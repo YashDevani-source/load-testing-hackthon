@@ -1,0 +1,5 @@
+# The server crate denies unwrap/expect/panic/indexing in request code.
+# Tests are allowed to use them: a panicking test is just a failing test.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true

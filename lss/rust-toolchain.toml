@@ -1,0 +1,5 @@
+# Pin the exact compiler so laptop, CI and box all build the same thing.
+[toolchain]
+channel = "1.100.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

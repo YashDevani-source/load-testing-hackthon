@@ -1,0 +1,90 @@
+# CI: lint, test, build the release binary on Ubuntu 24.04, smoke-test it, and
+# upload it as the artifact that cd.yml deploys.
+#
+# Runs on every push and PR. Pushes to main run it through cd.yml (which calls
+# this file as a reusable workflow, so the deploy uses the exact binary that
+# passed), hence `branches-ignore: [main]` here to avoid running it twice.
+#
+# Why ubuntu-24.04: glibc is backward compatible, not forward. A binary linked
+# against 24.04's glibc 2.39 runs on the box (24.04 for finals, 26.04 / glibc
+# 2.43 now). Never build on anything newer than the box.
+name: CI
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: lint, test, build, smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup is preinstalled on GitHub runners; with no arguments it installs
+      # the toolchain + components pinned in rust-toolchain.toml.
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: shellcheck
+        run: shellcheck -x deploy/*.sh
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo build --release
+        run: cargo build --release --locked -p lss-server
+
+      # Start the real binary on a temp DB, run the smoke tests against it, then
+      # stop it with SIGTERM and require a clean exit (exercises the graceful
+      # shutdown + final checkpoint path systemd uses).
+      - name: Smoke test the release binary
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/lss"
+          mkdir -p "$work"
+          HOST=127.0.0.1 PORT=8080 WORKERS=2 DATABASE_PATH="$work/lss.db" \
+            ./target/release/lss-server > "$work/server.log" 2>&1 &
+          pid=$!
+          trap 'echo "--- server log ---"; cat "$work/server.log"' EXIT
+          for _ in $(seq 100); do
+            curl -fs http://127.0.0.1:8080/health >/dev/null && break
+            sleep 0.1
+          done
+          deploy/smoke.sh http://127.0.0.1:8080
+          kill -TERM "$pid"
+          wait "$pid"
+          echo "server exited cleanly (status $?)"
+
+      - name: Upload lss-server
+        uses: actions/upload-artifact@v7
+        with:
+          name: lss-server
+          path: target/release/lss-server
+          if-no-files-found: error
+          retention-days: 30

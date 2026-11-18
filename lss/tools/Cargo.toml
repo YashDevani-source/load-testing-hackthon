@@ -1,0 +1,13 @@
+[package]
+name = "lss-tools"
+version = "0.1.0"
+description = "Helper binaries: mini load generator and rule audit (task 3)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lss-sim"
+path = "src/bin/lss-sim.rs"
+
+[dependencies]

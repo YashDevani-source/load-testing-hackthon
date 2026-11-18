@@ -1,0 +1,42 @@
+# systemd unit for lss-server. Installed to /etc/systemd/system/lss.service by
+# setup-host.sh / remote-install.sh.
+#
+# The contract with the contest: after code freeze nobody can log in, so this
+# unit alone must bring the server back after a crash (kill -9) or a reboot,
+# without network access.
+
+[Unit]
+Description=Last Server Standing API (lss-server)
+After=network-online.target
+Wants=network-online.target
+# 0 = never stop restarting. With the default (5 starts in 10 s) a crash loop
+# would make systemd give up for good, and the run would be over.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=lss
+Group=lss
+# /opt/lss/current is a symlink to the active release; systemd resolves it at
+# each start, so a deploy only has to flip the link and restart.
+WorkingDirectory=/opt/lss/current
+ExecStart=/opt/lss/current/lss-server
+Environment=HOST=0.0.0.0 PORT=8080 WORKERS=2 DATABASE_PATH=/var/lib/lss/lss.db LOG_LEVEL=info
+
+# Restart on any exit, clean or not, after 200 ms: fast enough that a crash
+# costs well under a second of errors.
+Restart=always
+RestartSec=200ms
+
+# SIGTERM -> actix drains in-flight requests (<= 5 s) and runs the final WAL
+# checkpoint. If that somehow takes longer than 10 s, systemd sends SIGKILL,
+# which is still safe: committed data is in the WAL.
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Each keep-alive connection is a file descriptor; the load generator opens up
+# to 5,000. The default soft limit (1024) would refuse connections.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+# SC2016: '$var' inside single quotes in smoke.sh/crash-test.sh are jq variables
+#         (passed with --arg), not shell variables. Single quotes are intended.
+disable=SC2016
+# SC2029: deploy.sh expands $REMOTE_DIR/$NAME on the client on purpose; both are
+#         validated (mktemp path / [A-Za-z0-9._-] release name) before use.
+disable=SC2029

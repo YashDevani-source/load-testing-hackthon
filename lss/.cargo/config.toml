@@ -1,0 +1,6 @@
+# The box is an m7i.large (Sapphire Rapids), which supports x86-64-v3 (AVX2, BMI2,
+# FMA). GitHub's ubuntu-24.04 runners do too, so CI can run what it builds.
+# Scoped to the Linux x86_64 target only, so `cargo build` on an Apple Silicon Mac
+# is unaffected.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

@@ -1,0 +1,25 @@
+# Workspace root. Two crates:
+#   server/ - the API server binary (lss-server) that runs on the box
+#   tools/  - helper binaries for load generation and auditing (task 3)
+[workspace]
+resolver = "3"
+members = ["server", "tools"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.100"
+publish = false
+
+# One release profile for everything we ship.
+[profile.release]
+opt-level = 3
+# Fat LTO + one codegen unit: slower builds, but the compiler can inline across
+# crate boundaries (actix -> our handlers -> serde_json), which matters on a
+# single physical core.
+lto = "fat"
+codegen-units = 1
+# Unwind (not abort) so a bug that slips past the clippy lints kills one request's
+# worker task instead of the whole process.
+panic = "unwind"
+# Line tables only: keeps `perf` / backtraces readable without full debug info.
+debug = "line-tables-only"
