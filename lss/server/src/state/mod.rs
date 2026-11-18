@@ -1,60 +1,47 @@
 //! Shared application state, one instance per process, handed to every actix
 //! worker as `web::Data<AppState>` (an `Arc`).
 //!
-//! The database is the source of truth. The stores below are read caches that
-//! task 2 fills at startup and keeps in step with every committed write, so that
-//! the 80% of traffic that only reads never touches the database mutex.
+//! SQLite (through `writer`) is the source of truth in both read modes. In
+//! `READ_SOURCE=memory`, `mem` holds read caches that are loaded from SQLite at
+//! startup and updated only after a write has committed, under the writer lock.
+//! If the process dies, the caches die with it and are rebuilt from SQLite on the
+//! next start: memory is never the only copy (spec section 09).
 
 pub mod categories;
+pub mod memory;
 pub mod orders;
 pub mod products;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::db::{Db, DbError};
+use parking_lot::Mutex;
+use rusqlite::Connection;
 
-pub use categories::CategoryIndex;
-pub use orders::OrderStore;
-pub use products::ProductStore;
+use crate::config::ReadSource;
+
+pub use memory::MemoryStores;
+pub use orders::MemOrder;
+pub use products::MemProduct;
 
 pub struct AppState {
-    /// The one request connection. See [`crate::db`].
-    pub db: Db,
-    /// Set once, after the database is open and every store is loaded. `/health`
-    /// reports 503 until then, so the load generator can't start early.
-    ready: AtomicBool,
-    /// Product by id: fixed fields + pre-built JSON + current stock.
-    pub products: ProductStore,
-    /// Per-category product lists sorted by (price, id), for `GET /products?category=`.
-    pub categories: CategoryIndex,
-    /// Per-user order lists, for `GET /users/{userId}/orders`.
-    pub orders: OrderStore,
+    /// The only write connection. Hold the guard for the statements of one
+    /// request (microseconds), never across an `.await`.
+    pub writer: Mutex<Connection>,
+    /// Database file, for opening per-worker read connections.
+    pub db_path: PathBuf,
+    pub read_source: ReadSource,
+    /// Set once, after migrations and (in memory mode) loading. `/health`
+    /// reports 503 until then.
+    pub ready: AtomicBool,
+    /// `Some` only in memory mode.
+    pub mem: Option<MemoryStores>,
 }
 
 impl AppState {
-    /// A not-yet-ready state around an opened database.
-    pub fn new(db: Db) -> Self {
-        Self {
-            db,
-            ready: AtomicBool::new(false),
-            products: ProductStore::default(),
-            categories: CategoryIndex::default(),
-            orders: OrderStore::default(),
-        }
-    }
-
-    /// Fills the in-memory stores from the database. Runs once at startup, before
-    /// [`AppState::mark_ready`].
-    pub fn load_from_db(&self) -> Result<(), DbError> {
-        // TODO(task-2): read all products (ORDER BY category, price, id) and all
-        // orders, and build the three stores. Until then there is nothing to load,
-        // and opening the database is the whole of "ready".
-        Ok(())
-    }
-
     pub fn is_ready(&self) -> bool {
         // Acquire pairs with the Release in mark_ready: a worker that sees `true`
-        // also sees everything load_from_db wrote.
+        // also sees everything written before it.
         self.ready.load(Ordering::Acquire)
     }
 

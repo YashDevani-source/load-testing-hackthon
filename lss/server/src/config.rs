@@ -21,6 +21,34 @@ pub struct Config {
     pub database_path: PathBuf,
     /// A `tracing` filter such as `info` or `lss_server=debug,warn`.
     pub log_level: String,
+    /// Where GET requests read from. Writes always go to SQLite.
+    pub read_source: ReadSource,
+}
+
+/// Where the read endpoints get their data. SQLite is the source of truth in
+/// both modes; `Memory` only adds a cache in front of it for reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadSource {
+    /// Every read is a query on a per-worker read-only SQLite connection.
+    Sqlite,
+    /// Reads come from in-memory stores loaded from SQLite at startup and updated
+    /// after every committed write, under the writer lock.
+    Memory,
+}
+
+impl ReadSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Memory => "memory",
+        }
+    }
+}
+
+impl fmt::Display for ReadSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Which variable was wrong, and why.
@@ -46,6 +74,7 @@ pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_WORKERS: usize = 2;
 pub const DEFAULT_DATABASE_PATH: &str = "./data/lss.db";
 pub const DEFAULT_LOG_LEVEL: &str = "info";
+pub const DEFAULT_READ_SOURCE: ReadSource = ReadSource::Sqlite;
 
 /// Upper bound on WORKERS. Far above anything useful on 2 vCPU; it only exists to
 /// catch typos like WORKERS=200.
@@ -114,12 +143,26 @@ impl Config {
             });
         }
 
+        let read_source = match get("READ_SOURCE").as_deref().map(str::trim) {
+            None => DEFAULT_READ_SOURCE,
+            Some("sqlite") => ReadSource::Sqlite,
+            Some("memory") => ReadSource::Memory,
+            Some(other) => {
+                return Err(ConfigError {
+                    var: "READ_SOURCE",
+                    value: other.to_owned(),
+                    reason: "must be sqlite or memory",
+                });
+            }
+        };
+
         Ok(Self {
             host,
             port,
             workers,
             database_path,
             log_level,
+            read_source,
         })
     }
 }
@@ -145,6 +188,7 @@ mod tests {
         assert_eq!(c.workers, 2);
         assert_eq!(c.database_path, PathBuf::from("./data/lss.db"));
         assert_eq!(c.log_level, "info");
+        assert_eq!(c.read_source, ReadSource::Sqlite);
     }
 
     #[test]
@@ -155,6 +199,7 @@ mod tests {
             ("WORKERS", "4"),
             ("DATABASE_PATH", "/var/lib/lss/lss.db"),
             ("LOG_LEVEL", "warn"),
+            ("READ_SOURCE", "memory"),
         ])
         .unwrap();
         assert_eq!(c.host.to_string(), "127.0.0.1");
@@ -162,6 +207,7 @@ mod tests {
         assert_eq!(c.workers, 4);
         assert_eq!(c.database_path, PathBuf::from("/var/lib/lss/lss.db"));
         assert_eq!(c.log_level, "warn");
+        assert_eq!(c.read_source, ReadSource::Memory);
     }
 
     #[test]
@@ -183,6 +229,14 @@ mod tests {
         assert_eq!(
             config(&[("LOG_LEVEL", "lss_server=loud")]).unwrap_err().var,
             "LOG_LEVEL"
+        );
+        assert_eq!(
+            config(&[("READ_SOURCE", "redis")]).unwrap_err().var,
+            "READ_SOURCE"
+        );
+        assert_eq!(
+            config(&[("READ_SOURCE", "SQLITE")]).unwrap_err().var,
+            "READ_SOURCE"
         );
     }
 }

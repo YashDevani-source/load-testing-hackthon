@@ -18,7 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 actix-web = { version = "4.20.0", default-features = false, features = ["macros", "unicode"] }
+anyhow = "1.0.104"
+dashmap = "6.2.1"
 form_urlencoded = "1.2.2"
+itoa = "1.0.19"
 mimalloc = "0.1.52"
 parking_lot = "0.13.0"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
@@ -28,4 +31,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 
 [dev-dependencies]
 actix-http = { version = "3.22.0", default-features = false }
+futures = "0.3.34"
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }

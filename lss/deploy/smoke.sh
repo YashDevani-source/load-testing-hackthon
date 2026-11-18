@@ -12,16 +12,11 @@
 # database (the spec says ids and categories are never reused by the tester).
 # Exit code is non-zero on any mismatch.
 #
-# Until task 2 the business endpoints answer 501; the business checks are then
-# skipped with a clear message. Set SMOKE_REQUIRE_BUSINESS=1 to make that a
-# failure instead (do this once task 2 is merged).
-#
 # Needs: bash, curl >= 7.68 (parallel mode), jq.
 set -euo pipefail
 
 BASE="${1:-http://localhost:8080}"
 BASE="${BASE%/}"
-REQUIRE_BUSINESS="${SMOKE_REQUIRE_BUSINESS:-0}"
 
 for tool in curl jq; do
     command -v "$tool" >/dev/null 2>&1 || { echo "smoke: $tool is required" >&2; exit 2; }
@@ -118,7 +113,7 @@ count() { grep -c "^$1\$" <<<"$2" || true; }
 
 echo "smoke: $BASE (run $RUN)"
 
-# ---- contract: works from task 1 on ---------------------------------------------
+# ---- contract ---------------------------------------------------------------------
 echo "contract"
 req GET /health
 expect "GET /health -> 200 ok" 200 '.status == "ok"'
@@ -145,27 +140,15 @@ expect_error "POST /orders missing productId -> 400" 400 VALIDATION_ERROR
 req POST /orders "{\"userId\":\"usmk$RUN\",\"productId\":7}"
 expect_error "POST /orders numeric productId -> 400" 400 VALIDATION_ERROR
 
-# ---- business: needs task 2 -----------------------------------------------------
+# ---- business ---------------------------------------------------------------------
 CAT="csmk$RUN"
 P_CHEAP="psmk${RUN}c"   # price 100
 P_A="psmk${RUN}a"       # price 349, sorts before P_B on id
 P_B="psmk${RUN}b"       # price 349
 CHEAP_JSON="$(product_json "$P_CHEAP" "Smoke Cheap" "$CAT" 100 50)"
 
-req POST /products "$CHEAP_JSON"
-if [[ "$STATUS" == 501 ]]; then
-    echo
-    echo "SKIPPED business checks: endpoints answer 501 NOT_IMPLEMENTED (task 2 not merged yet)."
-    echo "smoke: $PASS passed, $FAIL failed (business checks skipped)"
-    if [[ "$REQUIRE_BUSINESS" == 1 ]]; then
-        echo "SMOKE_REQUIRE_BUSINESS=1: treating skipped business checks as failure" >&2
-        exit 1
-    fi
-    if ((FAIL > 0)); then exit 1; fi
-    exit 0
-fi
-
 echo "products"
+req POST /products "$CHEAP_JSON"
 expect "POST /products -> 201 + product" 201 "$SAME_AS" --argjson want "$CHEAP_JSON"
 req POST /products "$(product_json "$P_CHEAP" "Other Name" "$CAT" 999 1)"
 expect_error "POST /products duplicate id -> 409" 409 PRODUCT_EXISTS

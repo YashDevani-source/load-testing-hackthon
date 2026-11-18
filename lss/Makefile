@@ -16,7 +16,7 @@ RUN_ENV  ?= HOST=127.0.0.1 PORT=8080 WORKERS=2 DATABASE_PATH=./data/lss.db LOG_L
 help:
 	@echo "fmt         format all Rust code"
 	@echo "lint        rustfmt --check + clippy -D warnings + shellcheck"
-	@echo "test        unit + integration tests"
+	@echo "test        every test, both read modes"
 	@echo "build       optimised release build of lss-server"
 	@echo "run         build and run locally on 127.0.0.1:8080"
 	@echo "smoke       run deploy/smoke.sh against BASE_URL ($(BASE_URL))"
@@ -32,8 +32,10 @@ lint:
 	$(CARGO) clippy --all-targets -- -D warnings
 	@if command -v shellcheck >/dev/null; then shellcheck -x deploy/*.sh; else echo "shellcheck not installed; skipped"; fi
 
+# Every test in the workspace: unit, contract, concurrency, persistence,
+# migration and modes-agree, each HTTP test in both READ_SOURCE modes.
 test:
-	$(CARGO) test
+	$(CARGO) test --workspace
 
 build:
 	$(CARGO) build --release --locked -p lss-server

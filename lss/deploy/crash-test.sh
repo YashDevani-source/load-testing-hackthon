@@ -9,9 +9,6 @@
 #
 # Exit code is non-zero if the restart takes longer than MAX_WAIT_SECS (default
 # 15) or any data is missing.
-#
-# Until task 2 the business endpoints answer 501; the data checks are then
-# skipped with a message, and only the restart is tested.
 set -euo pipefail
 
 BASE="${1:-http://localhost:8080}"
@@ -38,30 +35,22 @@ main_pid() { systemctl show -p MainPID --value "$SERVICE"; }
 [[ "$(health_code)" == 200 ]] || die "server not healthy before the test"
 
 # ---- 1. data to look for afterwards ---------------------------------------------
-DATA=1
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/products" \
     -H 'content-type: application/json' \
     -d "{\"id\":\"$PRODUCT\",\"name\":\"Crash Test\",\"category\":\"ccrash$RUN\",\"price\":100,\"stock\":5}")"
-if [[ "$code" == 501 ]]; then
-    DATA=0
-    echo "NOTE: endpoints answer 501 (task 2 not merged): testing restart only, data checks skipped."
-elif [[ "$code" != 201 ]]; then
-    die "creating $PRODUCT returned $code"
-fi
+[[ "$code" == 201 ]] || die "creating $PRODUCT returned $code"
 
-if ((DATA)); then
-    ORDER="$(curl -s -X POST "$BASE/orders" -H 'content-type: application/json' \
-        -d "{\"userId\":\"$USER\",\"productId\":\"$PRODUCT\"}" | jq -r '.orderId // empty')"
-    [[ -n "$ORDER" ]] || die "order on $PRODUCT failed"
-    # Stock reads may lag up to 2 s; wait until the read shows the order.
-    for _ in $(seq 30); do
-        BEFORE="$(curl -s "$BASE/products/$PRODUCT")"
-        [[ "$(jq -r .stock <<<"$BEFORE")" == 4 ]] && break
-        sleep 0.1
-    done
-    [[ "$(jq -r .stock <<<"$BEFORE")" == 4 ]] || die "stock never showed 4 before the crash: $BEFORE"
-    echo "before: $BEFORE, order $ORDER"
-fi
+ORDER="$(curl -s -X POST "$BASE/orders" -H 'content-type: application/json' \
+    -d "{\"userId\":\"$USER\",\"productId\":\"$PRODUCT\"}" | jq -r '.orderId // empty')"
+[[ -n "$ORDER" ]] || die "order on $PRODUCT failed"
+# Stock reads may lag up to 2 s; wait until the read shows the order.
+for _ in $(seq 30); do
+    BEFORE="$(curl -s "$BASE/products/$PRODUCT")"
+    [[ "$(jq -r .stock <<<"$BEFORE")" == 4 ]] && break
+    sleep 0.1
+done
+[[ "$(jq -r .stock <<<"$BEFORE")" == 4 ]] || die "stock never showed 4 before the crash: $BEFORE"
+echo "before: $BEFORE, order $ORDER"
 
 # ---- 2. crash ----------------------------------------------------------------------
 OLD_PID="$(main_pid)"
@@ -86,14 +75,12 @@ ELAPSED_MS=$((($(date +%s%N) - START_NS) / 1000000))
 echo "back up as PID $pid after ${ELAPSED_MS} ms (NRestarts $RESTARTS_BEFORE -> $(systemctl show -p NRestarts --value "$SERVICE"))"
 
 # ---- 4. data survived ---------------------------------------------------------------
-if ((DATA)); then
-    AFTER="$(curl -s "$BASE/products/$PRODUCT")"
-    jq -e --argjson want "$BEFORE" '. == $want' >/dev/null <<<"$AFTER" ||
-        die "product changed across the crash: before $BEFORE, after $AFTER"
-    curl -s "$BASE/users/$USER/orders" |
-        jq -e --arg o "$ORDER" 'any(.orders[]; .orderId == $o)' >/dev/null ||
-        die "order $ORDER missing after the crash"
-    echo "data intact: $AFTER, order $ORDER still listed"
-fi
+AFTER="$(curl -s "$BASE/products/$PRODUCT")"
+jq -e --argjson want "$BEFORE" '. == $want' >/dev/null <<<"$AFTER" ||
+    die "product changed across the crash: before $BEFORE, after $AFTER"
+curl -s "$BASE/users/$USER/orders" |
+    jq -e --arg o "$ORDER" 'any(.orders[]; .orderId == $o)' >/dev/null ||
+    die "order $ORDER missing after the crash"
+echo "data intact: $AFTER, order $ORDER still listed"
 
 echo "PASS"

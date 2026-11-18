@@ -19,8 +19,6 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
 
-use super::DbError;
-
 /// How often the background thread checkpoints.
 pub const INTERVAL: Duration = Duration::from_secs(5);
 
@@ -51,7 +49,7 @@ pub struct Checkpointer {
 impl Checkpointer {
     /// Opens a checkpoint-only connection to the (already created) database and
     /// starts the thread.
-    pub fn spawn(db_path: &Path, interval: Duration) -> Result<Self, DbError> {
+    pub fn spawn(db_path: &Path, interval: Duration) -> anyhow::Result<Self> {
         // No CREATE flag: the request connection created the file and schema; if
         // the file is missing something is badly wrong and we want to know.
         let conn = Connection::open_with_flags(

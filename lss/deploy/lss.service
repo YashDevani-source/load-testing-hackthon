@@ -21,7 +21,10 @@ Group=lss
 # each start, so a deploy only has to flip the link and restart.
 WorkingDirectory=/opt/lss/current
 ExecStart=/opt/lss/current/lss-server
-Environment=HOST=0.0.0.0 PORT=8080 WORKERS=2 DATABASE_PATH=/var/lib/lss/lss.db LOG_LEVEL=info
+# READ_SOURCE=sqlite: reads query SQLite on per-worker read connections.
+# READ_SOURCE=memory: reads come from caches rebuilt from SQLite at startup.
+# Writes and every order decision go to SQLite in both modes.
+Environment=HOST=0.0.0.0 PORT=8080 WORKERS=2 DATABASE_PATH=/var/lib/lss/lss.db LOG_LEVEL=info READ_SOURCE=sqlite
 
 # Restart on any exit, clean or not, after 200 ms: fast enough that a crash
 # costs well under a second of errors.

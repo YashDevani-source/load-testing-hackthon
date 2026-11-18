@@ -5,9 +5,8 @@ survive a rising load on one AWS m7i.large (2 vCPU = **one physical core**, 8 Gi
 p99 ≤ 100 ms, ≤ 1% errors and **zero wrong answers**. Target: level 10 (10,000 req/s).
 Stretch: level 17 (50,000 req/s).
 
-> **Status: task 1 (scaffold).** `/health`, validation, the database layer, error rendering,
-> query parsing, scripts and CI/CD all work. The business routes validate their input and then
-> answer `501 {"error":"NOT_IMPLEMENTED"}` until task 2 (search for `TODO(task-2)`).
+> **Status: task 2 done.** All six endpoints work in both read modes (`READ_SOURCE=sqlite|memory`).
+> Design and the mapping of the spec's seven rules to code: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Architecture
 
@@ -22,11 +21,11 @@ Stretch: level 17 (50,000 req/s).
 │  │ actix-web: accept thread + WORKERS=2 workers (one per hyperthread)       │    │
 │  │   routes ─► validate.rs (pure)  ─► errors.rs ({"error":"CODE"})          │    │
 │  │      │                                                                    │    │
-│  │      ├─ reads (80%) ─► state/: in-memory read caches (task 2)             │    │
-│  │      │                 products · categories (price,id) · user orders     │    │
+│  │      ├─ reads (80%) ─► READ_SOURCE=sqlite: per-worker read-only conn    │    │
+│  │      │                 READ_SOURCE=memory: caches rebuilt from SQLite     │    │
 │  │      │                                                                    │    │
-│  │      └─ writes ──────► parking_lot::Mutex<rusqlite::Connection>           │    │
-│  │                        called directly, no thread hop                     │    │
+│  │      └─ writes ──────► parking_lot::Mutex<rusqlite::Connection> (writer) │    │
+│  │                        every order decided in one SQLite transaction     │    │
 │  └────────────────────────────────────────┬─────────────────────────────────┘    │
 │     lss-checkpoint thread (own connection) │  PRAGMA wal_checkpoint(PASSIVE)/5 s │
 │                                            ▼                                     │
@@ -46,7 +45,7 @@ Stretch: level 17 (50,000 req/s).
 | **WAL + `synchronous=NORMAL`** | A commit is an append to the WAL with no fsync. `kill -9` loses nothing (the data is already in the OS page cache); only a power cut could lose the last few commits. |
 | **`wal_autocheckpoint=0` + background checkpoint** | With auto-checkpoint, whichever request commits the 1000th page pays for the checkpoint, which shows up as p99 spikes. A background thread with **its own connection** checkpoints instead, so it never holds the request mutex. |
 | **`CHECK (stock >= 0)`, `UNIQUE (user_id, product_id)`** | These are the rules of the sale enforced by the database itself. Even with a logic bug, an oversell or a double purchase fails to commit. |
-| **In-memory read caches (task 2)** | 80% of traffic is reads, and stock may be up to 2 s old in reads. Reads never take the DB mutex. The **order decision always uses the database**. |
+| **Two read modes** | `sqlite` (default): reads run on a read-only connection per worker, in parallel with the writer thanks to WAL. `memory`: reads come from caches that are loaded from SQLite at startup and updated after each commit. Either way, reads never take the writer mutex, and the **order decision always uses the database**. |
 | **Hand-checked JSON / query parsing** | actix's typed extractors answer bad input with plain-text errors and accept/reject shapes that don't match the spec. Checking `serde_json::Value` by hand makes every rule explicit and unit-tested. |
 | **mimalloc** | Fast small allocations and no glibc arena contention between workers. |
 | **No per-request logging** | 10k log lines/s would cost real CPU. We log startup, shutdown and errors only. |
@@ -56,25 +55,30 @@ Stretch: level 17 (50,000 req/s).
 
 ## Data model
 
+Schema version 2 (`PRAGMA user_version = 2`):
+
 ```sql
 products(id TEXT PRIMARY KEY, name TEXT NOT NULL, category TEXT NOT NULL,
          price INTEGER NOT NULL CHECK (price >= 0),
-         stock INTEGER NOT NULL CHECK (stock >= 0))
+         stock INTEGER NOT NULL CHECK (stock >= 0),
+         json_prefix TEXT NOT NULL DEFAULT '')      -- {"id":..,"name":..,"category":..,"price":..,"stock":
 INDEX products_category_price_id ON products(category, price, id)   -- list order
 
-orders(order_id INTEGER PRIMARY KEY,                -- rowid: unique, monotonic
+orders(order_id INTEGER PRIMARY KEY,                -- rowid: unique, monotonic -> "o_<id>"
        user_id TEXT NOT NULL, product_id TEXT NOT NULL,
        UNIQUE (user_id, product_id))                -- one purchase per user/product
+
+categories(category TEXT PRIMARY KEY, total INTEGER NOT NULL) WITHOUT ROWID
 ```
 
-The schema lives in [`server/src/db/schema.sql`](server/src/db/schema.sql). It is compiled into the
-binary and applied idempotently at every start. `id`, `name`, `category` and `price` never change.
-`stock` changes only through orders. Nothing is ever deleted.
+Version 1 is [`server/src/db/schema.sql`](server/src/db/schema.sql). [`migrate.rs`](server/src/db/migrate.rs)
+upgrades any older database in place, in one transaction, at startup. `id`, `name`, `category`
+and `price` never change. `stock` changes only through orders. Nothing is ever deleted.
 
-**Planned order transaction (task 2):** product exists? (else 404) → `INSERT` order (UNIQUE
-violation → 409 `ALREADY_PURCHASED`) → `UPDATE … SET stock = stock - 1 WHERE id = ? AND stock > 0`
-(0 rows → rollback, 409 `SOLD_OUT`) → `COMMIT` → update the in-memory caches. Any error rolls back,
-so nothing changes.
+**Order transaction:** `UPDATE … SET stock = stock - 1 WHERE id = ? AND stock > 0 RETURNING stock`
+(no row: 404 if the product doesn't exist, else 409 `SOLD_OUT`) → `INSERT` the order (UNIQUE
+violation → 409 `ALREADY_PURCHASED`) → `COMMIT`. Every error drops the transaction, which rolls it
+back, so nothing changes. Full reasoning: [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Repository layout
 
@@ -93,7 +97,7 @@ Requires [rustup](https://rustup.rs). The pinned toolchain (1.100.0) installs au
 
 ```bash
 make lint        # rustfmt --check, clippy -D warnings, shellcheck
-make test        # unit + integration tests
+make test        # every test; each HTTP test runs in both read modes
 make run         # release build, serves on 127.0.0.1:8080, DB in ./data/lss.db
 make smoke       # in another terminal: deploy/smoke.sh against localhost:8080
 ```
@@ -107,6 +111,7 @@ Environment variables (validated at startup; a bad value exits with a message):
 | `WORKERS` | `2` | 1–64 |
 | `DATABASE_PATH` | `./data/lss.db` | parent directory is created |
 | `LOG_LEVEL` | `info` | any `tracing` filter, e.g. `warn` or `lss_server=debug` |
+| `READ_SOURCE` | `sqlite` | `sqlite` or `memory`: where GETs read from (writes always go to SQLite) |
 
 ## Deploy
 
@@ -158,8 +163,8 @@ Run all of this **on the box**:
 - [ ] `sudo reboot`, then `curl localhost:8080/health` → ok without logging in to start anything
 - [ ] Restart needs no internet: no git pull, no downloads, no installs on start (true by design)
 - [ ] No dev server, watcher or per-request logging (true by design)
-- [ ] `SMOKE_REQUIRE_BUSINESS=1 /opt/lss/current/smoke.sh` passes. It includes every status/error
-      code, the **last-unit test** (test 1: exactly one 201) and the **double-click test**
+- [ ] `/opt/lss/current/smoke.sh` passes. It includes every status/error code, the
+      **last-unit test** (test 1: exactly one 201) and the **double-click test**
       (test 2: exactly one 201, stock 999, one order listed)
 - [ ] `systemctl is-enabled lss` → `enabled`; `systemctl is-active apt-daily.timer` → inactive
 - [ ] Disk has room: `df -h /var/lib/lss`; the journal is capped at 200 MB
@@ -185,13 +190,15 @@ sqlite> PRAGMA journal_mode;                              -- wal
 sqlite> SELECT count(*) FROM products;
 sqlite> SELECT id, price, stock FROM products WHERE category = 'c8d21fa' ORDER BY price, id LIMIT 5;
 sqlite> SELECT * FROM orders WHERE user_id = 'u7b0e44c19a2f';
+sqlite> PRAGMA user_version;                             -- 2
 sqlite> SELECT p.id, p.stock, count(o.order_id) AS sold
         FROM products p LEFT JOIN orders o ON o.product_id = p.id GROUP BY p.id LIMIT 10;
 ```
 
 Common failures:
 
-- **`/health` stays 503:** state loading failed or is slow. Check `journalctl -u lss`.
+- **Nothing listens on 8080 after a deploy:** startup failed (migration, memory load, bind) and
+  systemd keeps restarting it. `journalctl -u lss` shows the reason.
 - **Exits immediately with `invalid PORT=...` (or another variable):** fix the `Environment=` line in the unit.
 - **`journal_mode is "delete"`:** the DB path is on a filesystem without shared-memory support. Keep it on local disk.
 - **Connections refused under load:** check `LimitNOFILE` (above) and `somaxconn`, and whether

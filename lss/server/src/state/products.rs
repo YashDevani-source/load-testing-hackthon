@@ -1,19 +1,35 @@
-//! Product store (task 2). Definition and design notes only.
-//!
-//! Planned design:
-//! - `id -> Arc<ProductEntry>` in a map that is read-mostly (written only by
-//!   `POST /products`, ~10,000 times during seeding plus one flash drop per level).
-//! - `ProductEntry` holds the fields that never change, pre-rendered as JSON
-//!   (`{"id":..,"name":..,"category":..,"price":..,"stock":`) so a read only
-//!   appends the current stock and `}`: no serialisation per request.
-//! - Stock lives in an `AtomicI64` per product, written only after the database
-//!   commit of an order (under the DB mutex), so it is never ahead of the truth
-//!   and never negative. Reads may lag by microseconds, far inside the 2 s rule.
-//! - `POST /orders` never trusts this number to accept or reject; the database
-//!   decides (spec rule: the stock check inside an order must be exact).
+//! A product in the memory store.
 
-/// All products, keyed by id. Empty placeholder until task 2.
-#[derive(Debug, Default)]
-pub struct ProductStore {
-    _private: (),
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// Everything a read needs to answer for one product.
+///
+/// The fixed fields are kept only as the pre-rendered `json_prefix` (plus `id` and
+/// `price`, which the category sort needs). `stock` is the only mutable field.
+#[derive(Debug)]
+pub struct MemProduct {
+    pub id: Box<str>,
+    pub price: i64,
+    /// `{"id":..,"name":..,"category":..,"price":..,"stock":` exactly as stored in
+    /// SQLite's `products.json_prefix`.
+    pub json_prefix: Box<str>,
+    pub stock: AtomicI64,
+}
+
+impl MemProduct {
+    /// Current stock for a read response.
+    ///
+    /// `Relaxed` is enough: stock is only written while the writer mutex is held
+    /// (after the database commit), and a reader may see a value a moment old,
+    /// which the spec allows (<= 2 s). No other memory is published through this
+    /// atomic, so no stronger ordering is needed. Orders never consult it.
+    pub fn stock(&self) -> i64 {
+        self.stock.load(Ordering::Relaxed)
+    }
+
+    /// Called only with the writer mutex held, with the stock the database just
+    /// committed (`UPDATE ... RETURNING stock`).
+    pub fn set_stock(&self, stock: i64) {
+        self.stock.store(stock, Ordering::Relaxed);
+    }
 }

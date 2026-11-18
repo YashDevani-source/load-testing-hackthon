@@ -1,5 +1,5 @@
--- Applied at every startup. Every statement is idempotent (IF NOT EXISTS), so
--- re-running it against an existing database changes nothing.
+-- Schema version 1 (task 1). Applied by migrate.rs step 0 -> 1; version 2 adds
+-- products.json_prefix and the categories table (see migrate.rs). Every statement here is idempotent (IF NOT EXISTS).
 
 -- Products. Only `stock` ever changes, and only through orders.
 CREATE TABLE IF NOT EXISTS products (
